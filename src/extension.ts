@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { FalkorDBManager } from './falkordb';
+import { performSync } from './sync';
 
 let falkorDBManager: FalkorDBManager;
 
@@ -12,7 +13,18 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Initialize Connection Manager
     falkorDBManager = new FalkorDBManager(statusBarItem);
-    falkorDBManager.connect();
+    
+    // Connect and Trigger Sync on success
+    falkorDBManager.connect().then(() => {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+            const rootPath = workspaceFolders[0].uri.fsPath;
+            // Delaying sync slightly to ensure VS Code UI is fully responsive
+            setTimeout(() => {
+                performSync(falkorDBManager, rootPath);
+            }, 1000);
+        }
+    });
 
     // Register a basic command
     const disposable = vscode.commands.registerCommand('anfs.status', () => {

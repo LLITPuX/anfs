@@ -27,12 +27,13 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile"
   },
-  "dependencies": {
-    "ioredis": "^5.4.1"
-  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.90.0",
     "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "falkordb": "^6.6.2",
+    "redis": "^5.12.1"
   }
 }

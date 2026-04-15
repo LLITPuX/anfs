@@ -1,8 +1,8 @@
-import { Redis } from 'ioredis';
+import { FalkorDB, Graph } from 'falkordb';
 import * as vscode from 'vscode';
 
 export class FalkorDBManager {
-    private client: Redis | null = null;
+    private db: FalkorDB | null = null;
     private statusBarItem: vscode.StatusBarItem;
 
     constructor(statusBarItem: vscode.StatusBarItem) {
@@ -10,39 +10,55 @@ export class FalkorDBManager {
         this.updateStatus('🔴 Disconnected');
     }
 
-    public connect() {
+    public async connect(): Promise<void> {
         this.updateStatus('⏳ Syncing');
-        
-        // Connect to localhost:6379 natively.
-        this.client = new Redis({
-            host: '127.0.0.1',
-            port: 6379,
-            retryStrategy: (times) => {
-                const delay = Math.min(times * 1000, 5000);
-                return delay;
-            },
-            maxRetriesPerRequest: null,
-        });
 
-        this.client.on('connect', () => {
+        try {
+            this.db = await FalkorDB.connect({
+                url: 'redis://127.0.0.1:6379',
+                socket: {
+                    reconnectStrategy: (retries: number) => {
+                        return Math.min(retries * 1000, 5000);
+                    }
+                } as any
+            });
+
             this.updateStatus('🟢 Connected');
-            // We only show info message to debug connection originally, can be annoying in production.
             vscode.window.showInformationMessage('ANFS: Connected to FalkorDB');
-        });
 
-        this.client.on('error', (err) => {
-            this.updateStatus('🔴 Disconnected');
-            vscode.window.showErrorMessage(`ANFS: FalkorDB Connection Error: ${err.message}`);
-        });
+            const redisClient = await this.db.connection;
 
-        this.client.on('close', () => {
+            redisClient.on('error', (err: any) => {
+                this.updateStatus('🔴 Disconnected');
+            });
+
+            redisClient.on('end', () => {
+                this.updateStatus('🔴 Disconnected');
+            });
+
+            redisClient.on('reconnecting', () => {
+                this.updateStatus('⏳ Syncing');
+            });
+
+            redisClient.on('ready', () => {
+                this.updateStatus('🟢 Connected');
+            });
+
+        } catch (err: any) {
             this.updateStatus('🔴 Disconnected');
-        });
+            console.error('Failed to connect to FalkorDB', err);
+            vscode.window.showErrorMessage(`ANFS: Initial Connection Failed: ${err.message}`);
+        }
+    }
+
+    public getGraph(graphName: string): Graph | null {
+        if (!this.db) return null;
+        return this.db.selectGraph(graphName);
     }
 
     public dispose() {
-        if (this.client) {
-            this.client.quit();
+        if (this.db) {
+            this.db.close();
         }
     }
 
@@ -51,3 +67,4 @@ export class FalkorDBManager {
         this.statusBarItem.show();
     }
 }
+
