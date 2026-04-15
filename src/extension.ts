@@ -1,8 +1,12 @@
 import * as vscode from 'vscode';
 import { FalkorDBManager } from './falkordb';
 import { performSync } from './sync';
+import { FSWatcher } from './watcher';
+import { ASTParser } from './ast';
 
 let falkorDBManager: FalkorDBManager;
+let fsWatcher: FSWatcher | undefined;
+const astParser = new ASTParser();
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('ANFS Extension is now active!');
@@ -15,13 +19,21 @@ export function activate(context: vscode.ExtensionContext) {
     falkorDBManager = new FalkorDBManager(statusBarItem);
     
     // Connect and Trigger Sync on success
-    falkorDBManager.connect().then(() => {
+    falkorDBManager.connect().then(async () => {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (workspaceFolders && workspaceFolders.length > 0) {
             const rootPath = workspaceFolders[0].uri.fsPath;
+            
+            // Initialize AST Parser
+            await astParser.init(context.extensionPath);
+
+            // Initialize FS Watcher
+            fsWatcher = new FSWatcher(falkorDBManager, rootPath, astParser);
+            fsWatcher.register(context);
+
             // Delaying sync slightly to ensure VS Code UI is fully responsive
             setTimeout(() => {
-                performSync(falkorDBManager, rootPath);
+                performSync(falkorDBManager, rootPath, astParser);
             }, 1000);
         }
     });
@@ -34,7 +46,10 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(disposable);
 }
 
-export function deactivate() {
+export async function deactivate() {
+    if (fsWatcher) {
+        await fsWatcher.flush();
+    }
     if (falkorDBManager) {
         falkorDBManager.dispose();
     }

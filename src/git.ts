@@ -82,6 +82,15 @@ export interface GitDiffFile {
     deletions: number;
 }
 
+export interface GitDiffHunk {
+    file: string;
+    oldStart: number;
+    oldLines: number;
+    newStart: number;
+    newLines: number;
+    lines: string[];
+}
+
 export async function getGitDiff(workspacePath: string, commitHash: string): Promise<GitDiffFile[]> {
     try {
         const buffer = await gitExecRaw(`show --numstat -z --format=format: ${commitHash}`, workspacePath);
@@ -114,5 +123,56 @@ export async function getGitDiff(workspacePath: string, commitHash: string): Pro
     } catch (error) {
         console.error('getGitDiff error:', error);
         return [];
+    }
+}
+
+export async function getGitDiffHunks(workspacePath: string, commitHash: string): Promise<GitDiffHunk[]> {
+    try {
+        const stdout = await gitExec(`show -U0 --format=format: ${commitHash}`, workspacePath);
+        const hunks: GitDiffHunk[] = [];
+        const lines = stdout.split('\n');
+        
+        let currentFile = '';
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (line.startsWith('diff --git')) {
+                const match = line.match(/b\/(.+)$/);
+                if (match) currentFile = match[1];
+            } else if (line.startsWith('@@')) {
+                const match = line.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
+                if (match && currentFile) {
+                    const hunk: GitDiffHunk = {
+                        file: currentFile,
+                        oldStart: parseInt(match[1], 10),
+                        oldLines: match[2] ? parseInt(match[2], 10) : 1,
+                        newStart: parseInt(match[3], 10),
+                        newLines: match[4] ? parseInt(match[4], 10) : 1,
+                        lines: []
+                    };
+                    
+                    let j = i + 1;
+                    while (j < lines.length && !lines[j].startsWith('@@') && !lines[j].startsWith('diff --git')) {
+                        hunk.lines.push(lines[j]);
+                        j++;
+                    }
+                    hunks.push(hunk);
+                    i = j - 1;
+                }
+            }
+        }
+        return hunks;
+    } catch (error) {
+        console.error('getGitDiffHunks error:', error);
+        return [];
+    }
+}
+
+export async function isIgnored(workspacePath: string, filePath: string): Promise<boolean> {
+    try {
+        // Use -q to just get the exit code
+        await gitExec(`check-ignore -q "${filePath}"`, workspacePath);
+        return true; // If exit code is 0, it is ignored
+    } catch {
+        return false; // If exit code is not 0, it is NOT ignored
     }
 }
