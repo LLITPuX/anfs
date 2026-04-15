@@ -5,26 +5,43 @@ import * as fs from 'fs';
 
 const execAsync = promisify(exec);
 
+/**
+ * Executes a git command and returns the raw Buffer.
+ */
+async function gitExecRaw(args: string, cwd: string): Promise<Buffer> {
+    const { stdout } = await execAsync(`git -c core.quotepath=false ${args}`, { cwd, encoding: 'buffer' });
+    return stdout as unknown as Buffer;
+}
+
+/**
+ * Executes a git command and returns the decoded UTF-8 string.
+ */
+async function gitExec(args: string, cwd: string): Promise<string> {
+    const buffer = await gitExecRaw(args, cwd);
+    return buffer.toString('utf8');
+}
+
 export async function checkAndInitRepo(workspacePath: string): Promise<boolean> {
     const gitPath = path.join(workspacePath, '.git');
     if (!fs.existsSync(gitPath)) {
         try {
-            await execAsync('git init', { cwd: workspacePath });
-            await execAsync('git add .', { cwd: workspacePath });
-            await execAsync('git commit -m "chore: initial commit by ANFS"', { cwd: workspacePath });
-            return true; // Newly initialized
+            await gitExec('init', workspacePath);
+            await gitExec('add .', workspacePath);
+            await gitExec('commit -m "chore: initial commit by ANFS"', workspacePath);
+            return true;
         } catch (error) {
             console.error('Failed to init git repository', error);
             return false;
         }
     }
-    return false; // Already initialized
+    return false;
 }
 
 export async function getTrackedFiles(workspacePath: string): Promise<string[]> {
     try {
-        const { stdout } = await execAsync('git ls-files', { cwd: workspacePath });
-        return stdout.trim().split('\n').filter(f => f.length > 0);
+        const buffer = await gitExecRaw('ls-files -z', workspacePath);
+        // Split by null byte on buffer level or string level (null byte is 0x00)
+        return buffer.toString('utf8').split('\0').filter(f => f.length > 0);
     } catch {
         return [];
     }
@@ -39,9 +56,8 @@ export interface GitCommit {
 
 export async function getGitLog(workspacePath: string, limit: number = 100): Promise<GitCommit[]> {
     try {
-        // Safe delimiter approach to avoid JSON injection/breaking
         const formatStr = '%H|~|%an|~|%at|~|%s';
-        const { stdout } = await execAsync(`git log -n ${limit} --format="${formatStr}"`, { cwd: workspacePath });
+        const stdout = await gitExec(`log -n ${limit} --format="${formatStr}"`, workspacePath);
         const lines = stdout.trim().split('\n').filter(line => line.length > 0);
         return lines.map(line => {
             const parts = line.split('|~|');
@@ -68,24 +84,35 @@ export interface GitDiffFile {
 
 export async function getGitDiff(workspacePath: string, commitHash: string): Promise<GitDiffFile[]> {
     try {
-        const { stdout } = await execAsync(`git show --numstat --format="" ${commitHash}`, { cwd: workspacePath });
-        const lines = stdout.trim().split('\n').filter(line => line.length > 0);
+        const buffer = await gitExecRaw(`show --numstat -z --format=format: ${commitHash}`, workspacePath);
+        const parts = buffer.toString('utf8').split('\0').filter(p => p.length > 0);
         const result: GitDiffFile[] = [];
-        for (const line of lines) {
-            const parts = line.split('\t');
-            if (parts.length === 3) {
-                const addedStr = parts[0].trim();
-                const deletedStr = parts[1].trim();
-                const file = parts[2].trim();
-                result.push({
-                    file,
-                    additions: addedStr === '-' ? 0 : parseInt(addedStr, 10),
-                    deletions: deletedStr === '-' ? 0 : parseInt(deletedStr, 10)
-                });
+
+        for (let i = 0; i < parts.length; i++) {
+            const part = parts[i];
+            if (part.includes('\t')) {
+                const subParts = part.split('\t');
+                if (subParts.length >= 3) {
+                    const added = parseInt(subParts[0], 10) || 0;
+                    const deleted = parseInt(subParts[1], 10) || 0;
+                    const filePath = subParts[2];
+
+                    if (filePath.length > 0) {
+                        result.push({ file: filePath, additions: added, deletions: deleted });
+                    } else {
+                        // Rename
+                        const oldPath = parts[++i];
+                        const newPath = parts[++i];
+                        if (newPath) {
+                            result.push({ file: newPath, additions: added, deletions: deleted });
+                        }
+                    }
+                }
             }
         }
         return result;
-    } catch {
+    } catch (error) {
+        console.error('getGitDiff error:', error);
         return [];
     }
 }
