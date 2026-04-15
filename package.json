@@ -33,6 +33,7 @@
     "typescript": "^5.4.5"
   },
   "dependencies": {
+    "axios": "^1.15.0",
     "falkordb": "^6.6.2",
     "redis": "^5.12.1",
     "tree-sitter-javascript": "^0.25.0",

@@ -28,28 +28,14 @@ export async function performSync(falkorDBManager: FalkorDBManager, workspacePat
             SET r.name = $name, r.timestamp = timestamp()
         `, { params: { path: workspacePath, name: repoName } });
 
-        // 3. Sync Files using UNWIND
+        // 3. Sync Files & Folders
         const files = await getTrackedFiles(workspacePath);
-        if (files.length > 0) {
-            const fileParams = files.map(f => ({
-                path: f,
-                language: path.extname(f).slice(1) || 'unknown'
-            }));
+        for (const file of files) {
+            await ensureFolderHierarchy(graph, workspacePath, file);
             
-            await graph.query(`
-                MATCH (r:Repository {path: $repoPath})
-                UNWIND $files AS f
-                MERGE (file:File {path: f.path})
-                SET file.language = f.language
-                MERGE (r)-[:CONTAINS]->(file)
-            `, { params: { repoPath: workspacePath, files: fileParams } });
-
-            // Initial AST Parse for all files
-            for (const file of files) {
-                const fullPath = path.isAbsolute(file) ? file : path.join(workspacePath, file);
-                const content = getFileContent(fullPath);
-                await syncAST(graph, file, content, astParser);
-            }
+            const fullPath = path.isAbsolute(file) ? file : path.join(workspacePath, file);
+            const content = getFileContent(fullPath);
+            await syncAST(graph, file, content, astParser);
         }
 
         // 4. Sync Commits and Diffs
@@ -126,15 +112,7 @@ export async function syncFileChange(falkorDBManager: FalkorDBManager, workspace
     const content = getFileContent(fullPath);
     const contentHash = Buffer.from(content).toString('base64').slice(0, 16); // Simple hash for now
 
-    await graph.query(`
-        MERGE (f:File {path: $path})
-        SET f.hash = $hash, f.timestamp = timestamp(), f.language = $language
-    `, { params: { 
-        path: relPath, 
-        hash: contentHash, 
-        language: path.extname(relPath).slice(1) || 'unknown' 
-    }});
-
+    await ensureFolderHierarchy(graph, workspacePath, relPath);
     await syncAST(graph, relPath, content, astParser);
 }
 
@@ -149,20 +127,8 @@ export async function syncFileCreate(falkorDBManager: FalkorDBManager, workspace
         const fullPath = path.isAbsolute(filePath) ? filePath : path.join(workspacePath, filePath);
         const relPath = path.isAbsolute(filePath) ? path.relative(workspacePath, filePath) : filePath;
         const content = getFileContent(fullPath);
-        const contentHash = Buffer.from(content).toString('base64').slice(0, 16);
 
-        await graph.query(`
-            MATCH (r:Repository {path: $repoPath})
-            MERGE (f:File {path: $path})
-            SET f.hash = $hash, f.timestamp = timestamp(), f.language = $language
-            MERGE (r)-[:CONTAINS]->(f)
-        `, { params: { 
-            repoPath: workspacePath,
-            path: relPath, 
-            hash: contentHash, 
-            language: path.extname(relPath).slice(1) || 'unknown' 
-        }});
-
+        await ensureFolderHierarchy(graph, workspacePath, relPath);
         await syncAST(graph, relPath, content, astParser);
     }
 }
@@ -214,13 +180,48 @@ async function syncAST(graph: Graph, relPath: string, content: string, astParser
         await graph.query(`
             MATCH (f:File {path: $path})
             UNWIND $blocks AS b
-            MERGE (block:CodeBlock {path: f.path, name: b.name, type: b.type})
+            MERGE (block:CodeBlock {path: f.path, name: b.name, type: b.type, start_line: b.start_line})
             SET block.code_body = b.code_body, 
-                block.start_line = b.start_line, 
                 block.end_line = b.end_line, 
                 block.timestamp = timestamp()
             REMOVE block.expired_at
             MERGE (f)-[:CONTAINS_BLOCK]->(block)
         `, { params: { path: relPath, blocks: blocks.map(b => ({ ...b })) } });
     }
+}
+
+async function ensureFolderHierarchy(graph: Graph, workspacePath: string, relPath: string) {
+    const segments = relPath.split(/[\\\/]/);
+    const fileName = segments.pop()!;
+    let currentParentType = 'Repository';
+    let currentParentPath = workspacePath;
+    let accumulatedPath = '';
+
+    for (const segment of segments) {
+        const nextPath = accumulatedPath ? path.join(accumulatedPath, segment) : segment;
+        
+        await graph.query(`
+            MATCH (p:${currentParentType} {path: $parentPath})
+            MERGE (f:Folder {path: $path})
+            SET f.name = $name
+            MERGE (p)-[:CONTAINS]->(f)
+        `, { params: { parentPath: currentParentPath, path: nextPath, name: segment } });
+
+        currentParentType = 'Folder';
+        currentParentPath = nextPath;
+        accumulatedPath = nextPath;
+    }
+
+    // Finally connect the file
+    await graph.query(`
+        MATCH (p:${currentParentType} {path: $parentPath})
+        MERGE (f:File {path: $path})
+        SET f.name = $name, f.language = $language, f.timestamp = timestamp()
+        MERGE (p)-[:CONTAINS]->(f)
+    `, { params: { 
+        parentPath: currentParentPath, 
+        path: relPath, 
+        name: fileName,
+        language: path.extname(relPath).slice(1) || 'unknown'
+    } });
 }
