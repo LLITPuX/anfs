@@ -18,25 +18,25 @@ export function activate(context: vscode.ExtensionContext) {
     // Initialize Connection Manager
     falkorDBManager = new FalkorDBManager(statusBarItem);
     
-    // Connect and Trigger Sync on success
-    falkorDBManager.connect().then(async () => {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (workspaceFolders && workspaceFolders.length > 0) {
-            const rootPath = workspaceFolders[0].uri.fsPath;
-            
-            // Initialize AST Parser
-            await astParser.init(context.extensionPath);
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (workspaceFolders && workspaceFolders.length > 0) {
+        const rootPath = workspaceFolders[0].uri.fsPath;
+        
+        // Initialize AST Parser early
+        astParser.init(context.extensionPath);
 
-            // Initialize FS Watcher
-            fsWatcher = new FSWatcher(falkorDBManager, rootPath, astParser);
-            fsWatcher.register(context);
+        // Initialize and register FS Watcher immediately
+        fsWatcher = new FSWatcher(falkorDBManager, rootPath, astParser);
+        fsWatcher.register(context);
 
-            // Delaying sync slightly to ensure VS Code UI is fully responsive
+        // Connect and Trigger Initial Sync on success
+        falkorDBManager.connect().then(async () => {
+            // Trigger initial sync slightly to ensure VS Code UI is fully responsive
             setTimeout(() => {
                 performSync(falkorDBManager, rootPath, astParser);
             }, 1000);
-        }
-    });
+        });
+    }
 
     const disposableStatus = vscode.commands.registerCommand('anfs.status', () => {
         vscode.window.showInformationMessage('ANFS status check initiated.');

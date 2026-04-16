@@ -53,7 +53,20 @@ export class FalkorDBManager {
 
     public getGraph(graphName: string): Graph | null {
         if (!this.db) return null;
-        return this.db.selectGraph(graphName);
+        const graph = this.db.selectGraph(graphName);
+        return graph;
+    }
+
+    public async ensureIndices(graph: Graph): Promise<void> {
+        const labels = ['Commit', 'File', 'CodeBlock', 'Folder', 'Repository', 'Diff'];
+        for (const label of labels) {
+            try {
+                await graph.query(`CREATE INDEX FOR (n:${label}) ON (n.valid_at)`);
+                await graph.query(`CREATE INDEX FOR (n:${label}) ON (n.transaction_at)`);
+            } catch (e) {
+                // Index might already exist
+            }
+        }
     }
 
     public dispose() {

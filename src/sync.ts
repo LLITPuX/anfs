@@ -23,42 +23,52 @@ export async function performSync(falkorDBManager: FalkorDBManager, workspacePat
         // 1. Init Repository if needed
         await checkAndInitRepo(workspacePath);
 
+        const normalizedRepoPath = normalizeToPosix(workspacePath);
+
         // 2. Create/Merge Repository Node
         await graph.query(`
             MERGE (r:Repository {path: $path})
-            SET r.name = $name, r.timestamp = timestamp()
-        `, { params: { path: workspacePath, name: repoName } });
+            SET r.name = $name, 
+                r.transaction_at = timestamp(),
+                r.valid_at = timestamp()
+        `, { params: { path: normalizedRepoPath, name: repoName } });
+
+        await falkorDBManager.ensureIndices(graph);
 
         // 3. Sync Files & Folders
         const files = await getTrackedFiles(workspacePath);
         for (const file of files) {
             const relPath = normalizeToPosix(file);
             await ensureFolderHierarchy(graph, workspacePath, relPath);
-            
+
             const fullPath = path.isAbsolute(file) ? file : path.join(workspacePath, file);
             const content = getFileContent(fullPath);
             await syncAST(graph, relPath, content, astParser);
         }
 
         // 4. Sync Commits and Diffs
-        const commits = await getGitLog(workspacePath, 50);
+        const commits = await getGitLog(workspacePath); // Full history
         for (const commit of commits) {
             await graph.query(`
                 MATCH (r:Repository {path: $repoPath})
                 MERGE (c:Commit {hash: $hash})
-                SET c.author = $author, c.timestamp = $timestamp, c.message = $message
+                SET c.author = $author, c.timestamp = $timestamp, c.message = $message,
+                    c.valid_at = $timestamp,
+                    c.transaction_at = timestamp()
                 MERGE (r)-[:HAS_COMMIT]->(c)
             `, { params: { repoPath: normalizeToPosix(workspacePath), ...commit } });
 
             const hunks = await getGitDiffHunks(workspacePath, commit.hash);
             for (const hunk of hunks) {
-                // Mapping hunks to blocks
+                const relHunkPath = normalizeToPosix(hunk.file);
                 await graph.query(`
                     MATCH (c:Commit {hash: $hash})
                     MERGE (f:File {path: $filePath})
                     MERGE (diff:Diff {commit_hash: $hash, path: $filePath, hunk: $hunkHeader})
                     SET diff.old_start = $oldStart, diff.old_lines = $oldLines,
-                        diff.new_start = $newStart, diff.new_lines = $newLines
+                        diff.new_start = $newStart, diff.new_lines = $newLines,
+                        diff.valid_at = $commit_timestamp,
+                        diff.transaction_at = timestamp()
                     MERGE (c)-[:CONTAINS]->(diff)
                     MERGE (diff)-[:ON_FILE]->(f)
                     
@@ -66,22 +76,22 @@ export async function performSync(falkorDBManager: FalkorDBManager, workspacePat
                     MATCH (f)-[:CONTAINS_BLOCK]->(b:CodeBlock)
                     WHERE b.start_line <= ($newStart + $newLines - 1) AND b.end_line >= $newStart
                     MERGE (diff)-[:AFFECTS]->(b)
-                `, { params: { 
-                    hash: commit.hash, 
-                    filePath: normalizeToPosix(hunk.file), 
-                    hunkHeader: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
-                    oldStart: hunk.oldStart,
-                    oldLines: hunk.oldLines,
-                    newStart: hunk.newStart,
-                    newLines: hunk.newLines
-                } });
+                `, {
+                    params: {
+                        hash: commit.hash,
+                        commit_timestamp: commit.timestamp,
+                        filePath: relHunkPath,
+                        hunkHeader: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
+                        oldStart: hunk.oldStart,
+                        oldLines: hunk.oldLines,
+                        newStart: hunk.newStart,
+                        newLines: hunk.newLines
+                    }
+                });
             }
         }
 
-        // 5. Cleanup Orphaned Folders
-        await cleanupOrphanedFolders(graph);
-
-        vscode.window.showInformationMessage(`ANFS: Sync complete for ${repoName}! Graph populated.`);
+        vscode.window.showInformationMessage(`ANFS: Sync complete for ${repoName}! Graph populated with ${commits.length} commits.`);
 
     } catch (error: any) {
         console.error('ANFS Sync Error:', error);
@@ -149,7 +159,9 @@ export async function syncFileRename(falkorDBManager: FalkorDBManager, workspace
     // We use a query that updates the path of the existing File node
     await graph.query(`
         MATCH (f:File {path: $oldPath})
-        SET f.path = $newPath, f.timestamp = timestamp()
+        SET f.path = $newPath, 
+            f.valid_at = timestamp(),
+            f.transaction_at = timestamp()
     `, { params: { oldPath: oldRelPath, newPath: newRelPath } });
 }
 
@@ -162,10 +174,10 @@ export async function syncFileDelete(falkorDBManager: FalkorDBManager, workspace
         const relPath = normalizeToPosix(path.isAbsolute(filePath) ? path.relative(workspacePath, filePath) : filePath);
         await graph.query(`
             MATCH (f:File {path: $path})
-            SET f.expired_at = timestamp()
+            SET f.expired_at = timestamp(), f.transaction_at = timestamp()
             WITH f
             MATCH (f)-[:CONTAINS_BLOCK]->(b)
-            SET b.expired_at = timestamp()
+            SET b.expired_at = timestamp(), b.transaction_at = timestamp()
         `, { params: { path: relPath } });
     }
 }
@@ -177,7 +189,7 @@ async function syncAST(graph: Graph, relPath: string, content: string, astParser
     // 1. Mark existing blocks as expired
     await graph.query(`
         MATCH (f:File {path: $path})-[:CONTAINS_BLOCK]->(b)
-        SET b.expired_at = timestamp()
+        SET b.expired_at = timestamp(), b.transaction_at = timestamp()
     `, { params: { path: relPath } });
 
     // 2. Merge new blocks
@@ -188,7 +200,8 @@ async function syncAST(graph: Graph, relPath: string, content: string, astParser
             MERGE (block:CodeBlock {path: f.path, name: b.name, type: b.type, start_line: b.start_line})
             SET block.code_body = b.code_body, 
                 block.end_line = b.end_line, 
-                block.timestamp = timestamp()
+                block.valid_at = timestamp(),
+                block.transaction_at = timestamp()
             REMOVE block.expired_at
             MERGE (f)-[:CONTAINS_BLOCK]->(block)
         `, { params: { path: relPath, blocks: blocks.map(b => ({ ...b })) } });
@@ -196,30 +209,14 @@ async function syncAST(graph: Graph, relPath: string, content: string, astParser
 }
 
 function normalizeToPosix(p: string): string {
-    return p.replace(/\\/g, '/');
-}
-
-async function cleanupOrphanedFolders(graph: Graph) {
-    let deletedCount = 0;
-    do {
-        const res = await graph.query(`
-            MATCH (f:Folder)
-            WHERE NOT (f)-[:CONTAINS]->()
-            DETACH DELETE f
-        `);
-        // Note: FalkorDB Node driver returns summary in metadata if using query results
-        // For simplicity, we can just run it a few times or check statistics if available
-        // But the query itself is safe to run multiple times.
-        // As a safeguard for depth, let's just do up to 10 iterations if we can't get exact count easily.
-        deletedCount++;
-    } while (deletedCount < 10); 
+    return p.replace(/\\/g, '/').toLowerCase();
 }
 
 async function ensureFolderHierarchy(graph: Graph, workspacePath: string, relPath: string) {
     const segments = relPath.split(/[\\\/]/);
     const fileName = segments.pop()!;
     let currentParentType = 'Repository';
-    let currentParentPath = workspacePath;
+    let currentParentPath = normalizeToPosix(workspacePath);
     let accumulatedPath = '';
 
     for (const segment of segments) {
@@ -228,9 +225,11 @@ async function ensureFolderHierarchy(graph: Graph, workspacePath: string, relPat
         await graph.query(`
             MATCH (p:${currentParentType} {path: $parentPath})
             MERGE (f:Folder {path: $path})
-            SET f.name = $name
+            ON CREATE SET f.name = $name, 
+                          f.valid_at = timestamp(), 
+                          f.transaction_at = timestamp()
             MERGE (p)-[:CONTAINS]->(f)
-        `, { params: { parentPath: normalizeToPosix(currentParentPath), path: nextPath, name: segment } });
+        `, { params: { parentPath: currentParentPath, path: nextPath, name: segment } });
 
         currentParentType = 'Folder';
         currentParentPath = nextPath;
@@ -241,10 +240,14 @@ async function ensureFolderHierarchy(graph: Graph, workspacePath: string, relPat
     await graph.query(`
         MATCH (p:${currentParentType} {path: $parentPath})
         MERGE (f:File {path: $path})
-        SET f.name = $name, f.language = $language, f.timestamp = timestamp()
+        ON CREATE SET f.name = $name, 
+                      f.language = $language, 
+                      f.valid_at = timestamp(), 
+                      f.transaction_at = timestamp()
+        SET f.timestamp = timestamp()
         MERGE (p)-[:CONTAINS]->(f)
     `, { params: { 
-        parentPath: normalizeToPosix(currentParentPath), 
+        parentPath: currentParentPath, 
         path: normalizeToPosix(relPath), 
         name: fileName,
         language: path.extname(relPath).slice(1) || 'unknown'

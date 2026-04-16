@@ -54,10 +54,11 @@ export interface GitCommit {
     message: string;
 }
 
-export async function getGitLog(workspacePath: string, limit: number = 100): Promise<GitCommit[]> {
+export async function getGitLog(workspacePath: string, limit?: number): Promise<GitCommit[]> {
     try {
         const formatStr = '%H|~|%an|~|%at|~|%s';
-        const stdout = await gitExec(`log -n ${limit} --format="${formatStr}"`, workspacePath);
+        const limitFlag = limit && limit > 0 ? `-n ${limit}` : '';
+        const stdout = await gitExec(`log ${limitFlag} --format="${formatStr}"`, workspacePath);
         const lines = stdout.trim().split('\n').filter(line => line.length > 0);
         return lines.map(line => {
             const parts = line.split('|~|');
@@ -131,7 +132,7 @@ export async function getGitDiffHunks(workspacePath: string, commitHash: string)
         const stdout = await gitExec(`show -U0 --format=format: ${commitHash}`, workspacePath);
         const hunks: GitDiffHunk[] = [];
         const lines = stdout.split('\n');
-        
+
         let currentFile = '';
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
@@ -149,7 +150,7 @@ export async function getGitDiffHunks(workspacePath: string, commitHash: string)
                         newLines: match[4] ? parseInt(match[4], 10) : 1,
                         lines: []
                     };
-                    
+
                     let j = i + 1;
                     while (j < lines.length && !lines[j].startsWith('@@') && !lines[j].startsWith('diff --git')) {
                         hunk.lines.push(lines[j]);
