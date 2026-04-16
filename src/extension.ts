@@ -38,12 +38,21 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // Register a basic command
-    const disposable = vscode.commands.registerCommand('anfs.status', () => {
+    const disposableStatus = vscode.commands.registerCommand('anfs.status', () => {
         vscode.window.showInformationMessage('ANFS status check initiated.');
     });
 
-    context.subscriptions.push(disposable);
+    const disposableSync = vscode.commands.registerCommand('anfs.fullSync', async () => {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+            const rootPath = workspaceFolders[0].uri.fsPath;
+            await performSync(falkorDBManager, rootPath, astParser);
+        } else {
+            vscode.window.showWarningMessage('ANFS: No workspace folders found to sync.');
+        }
+    });
+
+    context.subscriptions.push(disposableStatus, disposableSync);
 }
 
 export async function deactivate() {

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { posix as posixPath } from 'path';
 import { FalkorDBManager } from './falkordb';
 import { checkAndInitRepo, getTrackedFiles, getGitLog, getGitDiff, getGitDiffHunks, isIgnored } from './git';
 import * as fs from 'fs';
@@ -31,11 +32,12 @@ export async function performSync(falkorDBManager: FalkorDBManager, workspacePat
         // 3. Sync Files & Folders
         const files = await getTrackedFiles(workspacePath);
         for (const file of files) {
-            await ensureFolderHierarchy(graph, workspacePath, file);
+            const relPath = normalizeToPosix(file);
+            await ensureFolderHierarchy(graph, workspacePath, relPath);
             
             const fullPath = path.isAbsolute(file) ? file : path.join(workspacePath, file);
             const content = getFileContent(fullPath);
-            await syncAST(graph, file, content, astParser);
+            await syncAST(graph, relPath, content, astParser);
         }
 
         // 4. Sync Commits and Diffs
@@ -46,7 +48,7 @@ export async function performSync(falkorDBManager: FalkorDBManager, workspacePat
                 MERGE (c:Commit {hash: $hash})
                 SET c.author = $author, c.timestamp = $timestamp, c.message = $message
                 MERGE (r)-[:HAS_COMMIT]->(c)
-            `, { params: { repoPath: workspacePath, ...commit } });
+            `, { params: { repoPath: normalizeToPosix(workspacePath), ...commit } });
 
             const hunks = await getGitDiffHunks(workspacePath, commit.hash);
             for (const hunk of hunks) {
@@ -66,7 +68,7 @@ export async function performSync(falkorDBManager: FalkorDBManager, workspacePat
                     MERGE (diff)-[:AFFECTS]->(b)
                 `, { params: { 
                     hash: commit.hash, 
-                    filePath: hunk.file, 
+                    filePath: normalizeToPosix(hunk.file), 
                     hunkHeader: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
                     oldStart: hunk.oldStart,
                     oldLines: hunk.oldLines,
@@ -75,6 +77,9 @@ export async function performSync(falkorDBManager: FalkorDBManager, workspacePat
                 } });
             }
         }
+
+        // 5. Cleanup Orphaned Folders
+        await cleanupOrphanedFolders(graph);
 
         vscode.window.showInformationMessage(`ANFS: Sync complete for ${repoName}! Graph populated.`);
 
@@ -108,7 +113,7 @@ export async function syncFileChange(falkorDBManager: FalkorDBManager, workspace
     if (!graph) return;
 
     const fullPath = path.isAbsolute(filePath) ? filePath : path.join(workspacePath, filePath);
-    const relPath = path.isAbsolute(filePath) ? path.relative(workspacePath, filePath) : filePath;
+    const relPath = normalizeToPosix(path.isAbsolute(filePath) ? path.relative(workspacePath, filePath) : filePath);
     const content = getFileContent(fullPath);
     const contentHash = Buffer.from(content).toString('base64').slice(0, 16); // Simple hash for now
 
@@ -125,7 +130,7 @@ export async function syncFileCreate(falkorDBManager: FalkorDBManager, workspace
         if (await isIgnored(workspacePath, filePath)) continue;
 
         const fullPath = path.isAbsolute(filePath) ? filePath : path.join(workspacePath, filePath);
-        const relPath = path.isAbsolute(filePath) ? path.relative(workspacePath, filePath) : filePath;
+        const relPath = normalizeToPosix(path.isAbsolute(filePath) ? path.relative(workspacePath, filePath) : filePath);
         const content = getFileContent(fullPath);
 
         await ensureFolderHierarchy(graph, workspacePath, relPath);
@@ -138,8 +143,8 @@ export async function syncFileRename(falkorDBManager: FalkorDBManager, workspace
     const graph = falkorDBManager.getGraph(graphName);
     if (!graph) return;
 
-    const oldRelPath = path.isAbsolute(oldPath) ? path.relative(workspacePath, oldPath) : oldPath;
-    const newRelPath = path.isAbsolute(newPath) ? path.relative(workspacePath, newPath) : newPath;
+    const oldRelPath = normalizeToPosix(path.isAbsolute(oldPath) ? path.relative(workspacePath, oldPath) : oldPath);
+    const newRelPath = normalizeToPosix(path.isAbsolute(newPath) ? path.relative(workspacePath, newPath) : newPath);
 
     // We use a query that updates the path of the existing File node
     await graph.query(`
@@ -154,7 +159,7 @@ export async function syncFileDelete(falkorDBManager: FalkorDBManager, workspace
     if (!graph) return;
 
     for (const filePath of filePaths) {
-        const relPath = path.isAbsolute(filePath) ? path.relative(workspacePath, filePath) : filePath;
+        const relPath = normalizeToPosix(path.isAbsolute(filePath) ? path.relative(workspacePath, filePath) : filePath);
         await graph.query(`
             MATCH (f:File {path: $path})
             SET f.expired_at = timestamp()
@@ -190,6 +195,26 @@ async function syncAST(graph: Graph, relPath: string, content: string, astParser
     }
 }
 
+function normalizeToPosix(p: string): string {
+    return p.replace(/\\/g, '/');
+}
+
+async function cleanupOrphanedFolders(graph: Graph) {
+    let deletedCount = 0;
+    do {
+        const res = await graph.query(`
+            MATCH (f:Folder)
+            WHERE NOT (f)-[:CONTAINS]->()
+            DETACH DELETE f
+        `);
+        // Note: FalkorDB Node driver returns summary in metadata if using query results
+        // For simplicity, we can just run it a few times or check statistics if available
+        // But the query itself is safe to run multiple times.
+        // As a safeguard for depth, let's just do up to 10 iterations if we can't get exact count easily.
+        deletedCount++;
+    } while (deletedCount < 10); 
+}
+
 async function ensureFolderHierarchy(graph: Graph, workspacePath: string, relPath: string) {
     const segments = relPath.split(/[\\\/]/);
     const fileName = segments.pop()!;
@@ -198,14 +223,14 @@ async function ensureFolderHierarchy(graph: Graph, workspacePath: string, relPat
     let accumulatedPath = '';
 
     for (const segment of segments) {
-        const nextPath = accumulatedPath ? path.join(accumulatedPath, segment) : segment;
+        const nextPath = accumulatedPath ? posixPath.join(accumulatedPath, segment) : segment;
         
         await graph.query(`
             MATCH (p:${currentParentType} {path: $parentPath})
             MERGE (f:Folder {path: $path})
             SET f.name = $name
             MERGE (p)-[:CONTAINS]->(f)
-        `, { params: { parentPath: currentParentPath, path: nextPath, name: segment } });
+        `, { params: { parentPath: normalizeToPosix(currentParentPath), path: nextPath, name: segment } });
 
         currentParentType = 'Folder';
         currentParentPath = nextPath;
@@ -219,8 +244,8 @@ async function ensureFolderHierarchy(graph: Graph, workspacePath: string, relPat
         SET f.name = $name, f.language = $language, f.timestamp = timestamp()
         MERGE (p)-[:CONTAINS]->(f)
     `, { params: { 
-        parentPath: currentParentPath, 
-        path: relPath, 
+        parentPath: normalizeToPosix(currentParentPath), 
+        path: normalizeToPosix(relPath), 
         name: fileName,
         language: path.extname(relPath).slice(1) || 'unknown'
     } });

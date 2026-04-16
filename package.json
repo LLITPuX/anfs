@@ -18,6 +18,10 @@
       {
         "command": "anfs.status",
         "title": "ANFS: Show Status"
+      },
+      {
+        "command": "anfs.fullSync",
+        "title": "ANFS: Run Full Sync"
       }
     ]
   },
