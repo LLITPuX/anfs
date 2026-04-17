@@ -1,4 +1,9 @@
-import * as vscode from 'vscode';
+let vscode: any;
+try {
+    vscode = require('vscode');
+} catch (e) {
+    // CLI mode
+}
 import * as path from 'path';
 import { posix as posixPath } from 'path';
 import { FalkorDBManager } from './falkordb';
@@ -18,7 +23,10 @@ export async function performSync(falkorDBManager: FalkorDBManager, workspacePat
     }
 
     try {
-        vscode.window.showInformationMessage(`ANFS: Starting git sync for ${repoName}...`);
+        if (vscode?.window) {
+            vscode.window.showInformationMessage(`ANFS: Starting git sync for ${repoName}...`);
+        }
+        console.log(`ANFS: Starting git sync for ${repoName}...`);
 
         // 1. Init Repository if needed
         await checkAndInitRepo(workspacePath);
@@ -38,12 +46,18 @@ export async function performSync(falkorDBManager: FalkorDBManager, workspacePat
         // 3. Sync Files & Folders
         const files = await getTrackedFiles(workspacePath);
         for (const file of files) {
-            const relPath = normalizeToPosix(file);
-            await ensureFolderHierarchy(graph, workspacePath, relPath);
+            try {
+                const relPath = normalizeToPosix(file);
+                await ensureFolderHierarchy(graph, workspacePath, relPath);
 
-            const fullPath = path.isAbsolute(file) ? file : path.join(workspacePath, file);
-            const content = getFileContent(fullPath);
-            await syncAST(graph, relPath, content, astParser);
+                const fullPath = path.isAbsolute(file) ? file : path.join(workspacePath, file);
+                const content = getFileContent(fullPath);
+                if (content) {
+                    await syncAST(graph, relPath, content, astParser);
+                }
+            } catch (fileErr) {
+                console.error(`Error syncing file ${file}:`, fileErr);
+            }
         }
 
         // 4. Sync Commits and Diffs
@@ -91,11 +105,17 @@ export async function performSync(falkorDBManager: FalkorDBManager, workspacePat
             }
         }
 
-        vscode.window.showInformationMessage(`ANFS: Sync complete for ${repoName}! Graph populated with ${commits.length} commits.`);
+        const msg = `ANFS: Sync complete for ${repoName}! Graph populated with ${commits.length} commits.`;
+        console.log(msg);
+        if (vscode?.window) {
+            vscode.window.showInformationMessage(msg);
+        }
 
     } catch (error: any) {
         console.error('ANFS Sync Error:', error);
-        vscode.window.showErrorMessage(`ANFS Sync Error: ${error.message}`);
+        if (vscode?.window) {
+            vscode.window.showErrorMessage(`ANFS Sync Error: ${error.message}`);
+        }
     }
 }
 
@@ -108,6 +128,9 @@ function getFileContent(filePath: string): string {
     }
 
     try {
+        if (!fs.existsSync(filePath) || !fs.lstatSync(filePath).isFile()) {
+            return '';
+        }
         return fs.readFileSync(filePath, 'utf8');
     } catch (err) {
         console.error(`Error reading file ${filePath}:`, err);

@@ -1,12 +1,17 @@
 import { FalkorDB, Graph } from 'falkordb';
-import * as vscode from 'vscode';
+let vscode: any;
+try {
+    vscode = require('vscode');
+} catch (e) {
+    // CLI mode
+}
 
 export class FalkorDBManager {
     private db: FalkorDB | null = null;
-    private statusBarItem: vscode.StatusBarItem;
+    private statusBarItem: any;
 
-    constructor(statusBarItem: vscode.StatusBarItem) {
-        this.statusBarItem = statusBarItem;
+    constructor(statusBarItem?: any) {
+        this.statusBarItem = statusBarItem || null as any;
         this.updateStatus('🔴 Disconnected');
     }
 
@@ -24,7 +29,11 @@ export class FalkorDBManager {
             });
 
             this.updateStatus('🟢 Connected');
-            vscode.window.showInformationMessage('ANFS: Connected to FalkorDB');
+            if (this.statusBarItem) {
+                vscode.window.showInformationMessage('ANFS: Connected to FalkorDB');
+            } else {
+                console.log('ANFS: Connected to FalkorDB');
+            }
 
             const redisClient = await this.db.connection;
 
@@ -47,7 +56,9 @@ export class FalkorDBManager {
         } catch (err: any) {
             this.updateStatus('🔴 Disconnected');
             console.error('Failed to connect to FalkorDB', err);
-            vscode.window.showErrorMessage(`ANFS: Initial Connection Failed: ${err.message}`);
+            if (this.statusBarItem) {
+                vscode.window.showErrorMessage(`ANFS: Initial Connection Failed: ${err.message}`);
+            }
         }
     }
 
@@ -76,8 +87,12 @@ export class FalkorDBManager {
     }
 
     private updateStatus(text: string) {
-        this.statusBarItem.text = `ANFS: ${text}`;
-        this.statusBarItem.show();
+        if (this.statusBarItem) {
+            this.statusBarItem.text = `ANFS: ${text}`;
+            this.statusBarItem.show();
+        } else {
+            console.log(`ANFS Status: ${text}`);
+        }
     }
 }
 
